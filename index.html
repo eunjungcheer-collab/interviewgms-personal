@@ -251,26 +251,70 @@ function sha256(ascii){
 function utf8ascii(str){ return unescape(encodeURIComponent(str)); }
 function pwHash(name,pw){ return sha256(utf8ascii(name+':'+pw)); }
 let tFrom='setup';
-async function fetchServerPw(name){
+let loginMode='login'; // 'login' | 'signup'
+/* ===== 학생 계정: 가입 시 이름+비밀번호의 변환값만 구글 시트 '회원' 탭에 저장 ===== */
+async function fetchServerAcct(name){
   try{
-    const r=await fetch(SHEET_WEBHOOK_URL+'?action=getPw&name='+encodeURIComponent(name)+'&_='+Date.now());
+    const r=await fetch(DDAY_URL+'?action=getAcct&name='+encodeURIComponent(name)+'&_='+Date.now());
     const j=await r.json();
-    if(j && j.ok && j.supported) return {supported:true,hash:j.hash||''};
+    if(j && j.ok && j.supported) return {supported:true,exists:!!j.exists,hash:j.hash||''};
   }catch(e){}
   return {supported:false};
 }
-function getLocalPwHash(name){ try{ return localStorage.getItem('spw_'+name); }catch(e){ return null; } }
-function setLocalPwHash(name,h){ try{ localStorage.setItem('spw_'+name,h); }catch(e){} }
-/* 기본 비밀번호 1234. 학생이 바꾸면 구글 시트('비밀번호' 탭)에 변환값만 저장돼서 어느 기기에서나 적용돼요 */
-async function verifyLogin(name,pw){
-  const h=pwHash(name,pw), def=pwHash(name,DEFAULT_STUDENT_PW);
-  const s=await fetchServerPw(name);
-  if(s.supported){
-    const cur=s.hash||def;
-    setLocalPwHash(name,cur);
-    return h===cur;
+function getLocalAcct(name){ try{ return localStorage.getItem('acct_stu_'+name); }catch(e){ return null; } }
+function setLocalAcct(name,h){ try{ localStorage.setItem('acct_stu_'+name,h); }catch(e){} }
+async function attemptSignup(){
+  const nm=(document.getElementById('loginNameInput').value||'').trim();
+  const pw=(document.getElementById('loginPwInput').value||'').trim();
+  const pw2=(document.getElementById('loginPw2Input').value||'').trim();
+  if(!nm){ await showAlert('이름을 입력해 주세요!'); return; }
+  if(!hasStudentBank(nm)){ await showAlert('등록된 학생 이름이 아니에요. 선생님께 이름을 확인해 주세요!'); return; }
+  if(pw.length<4){ await showAlert('비밀번호는 4자 이상으로 정해 주세요.'); return; }
+  if(pw!==pw2){ await showAlert('비밀번호 확인이 달라요. 다시 입력해 주세요.'); return; }
+  showLoadingModal('가입 중...');
+  const h=pwHash(nm,pw);
+  const sv=await fetchServerAcct(nm);
+  if(sv.supported){
+    if(sv.exists){ hideLoadingModal(); await showAlert('이미 가입된 이름이에요. 로그인해 주세요.\n(비밀번호를 잊었다면 선생님께 초기화를 요청하세요.)'); return; }
+    try{ await fetch(DDAY_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:'signup',name:nm,hash:h})}); }catch(e){}
+    const chk=await fetchServerAcct(nm);
+    if(!(chk.supported && chk.exists && chk.hash===h)){ hideLoadingModal(); await showAlert('가입에 실패했어요. 인터넷 연결을 확인하고 다시 해 주세요.'); return; }
+  } else {
+    // 서버가 아직 업데이트되지 않은 경우: 이 기기에만 저장
+    if(getLocalAcct(nm)){ hideLoadingModal(); await showAlert('이 기기에 이미 가입된 이름이에요. 로그인해 주세요.'); return; }
   }
-  return h===(getLocalPwHash(name)||def);
+  setLocalAcct(nm,h);
+  hideLoadingModal();
+  await showAlert(sv.supported ? '가입 완료! 바로 입장할게요.' : '가입 완료! (이 기기에만 저장됐어요) 바로 입장할게요.');
+  await enterApp(nm);
+}
+async function attemptLogin(){
+  if(loginMode==='signup') return attemptSignup();
+  const nm=(document.getElementById('loginNameInput').value||'').trim();
+  const pw=(document.getElementById('loginPwInput').value||'').trim();
+  if(!nm){ await showAlert('이름을 입력해 주세요!'); return; }
+  if(!pw){ await showAlert('비밀번호를 입력해 주세요!'); return; }
+  if(!hasStudentBank(nm)){ await showAlert('이름이나 비밀번호가 맞지 않아요. 다시 확인해 주세요.'); return; }
+  showLoadingModal('로그인 확인 중...');
+  const h=pwHash(nm,pw);
+  const sv=await fetchServerAcct(nm);
+  let ok=false, noAcct=false;
+  if(sv.supported){ if(!sv.exists) noAcct=true; else { ok=(h===sv.hash); if(ok) setLocalAcct(nm,h); } }
+  else { const lh=getLocalAcct(nm); if(!lh) noAcct=true; else ok=(h===lh); }
+  hideLoadingModal();
+  if(noAcct){ await showAlert('가입되지 않은 이름이에요. 아래 「처음이면 가입하기」를 눌러 가입해 주세요.'); return; }
+  if(!ok){ await showAlert('이름이나 비밀번호가 맞지 않아요. 다시 확인해 주세요.'); return; }
+  await enterApp(nm);
+}
+async function enterApp(nm){
+  loginMode='login';
+  state.name = nm;
+  saveLastUsedName(nm);
+  showLoadingModal('이전 기록을 확인하고 있어요...');
+  serverResumeCache = await fetchServerResumeSnapshots(nm);
+  hideLoadingModal();
+  screen = 'setup';
+  render();
 }
 const WRONG_THRESHOLD=70; // 이 점수 미만이면 오답노트에 등록
 const SHEET_WEBHOOK_URL='https://script.google.com/macros/s/AKfycbzRUmJE4hQoQg7ocD-Xgf3g_pF6PgNMq0-FusM4N5Z1awW0r7r2JupernNWy9blqARR/exec';
@@ -1038,7 +1082,6 @@ function render(){
   else if(screen==='result') app.innerHTML=renderResult();
   else if(screen==='mystats') app.innerHTML=renderMyStats();
   else if(screen==='tlogin') app.innerHTML=renderTLogin();
-  else if(screen==='chpw') app.innerHTML=renderChPw();
   else if(screen==='tdash') app.innerHTML=renderTDash();
   else if(screen==='tdetail') app.innerHTML=renderTDetail();
   bindEvents();
@@ -1046,41 +1089,24 @@ function render(){
 }
 
 function renderLogin(){
-  const loginEnabled = !loginConfigCache || loginConfigCache.loginEnabled !== false;
+  const su = loginMode==='signup';
   return `
   <div class="card">
     <h2 class="card-title" style="text-align:center;">🎙️ 학생별 모의면접 마스터</h2>
     <p class="card-sub" style="text-align:center;">GMS학원 이은정 강사 · 자사·특목·과고반 대비</p>
-    <label class="field-label" style="margin-top:18px;">🙋 이름(아이디)을 입력해줘</label>
+    <p style="text-align:center;font-weight:800;margin:14px 0 0;">${su?'📝 처음이면 가입하기':'🔐 로그인'}</p>
+    <label class="field-label" style="margin-top:14px;">🙋 이름(아이디)</label>
     <input type="text" id="loginNameInput" placeholder="이름을 입력하세요" value="${escapeHtml(state.name)}" autocomplete="off">
-    <label class="field-label" style="margin-top:14px;">🔑 비밀번호를 입력해줘</label>
-    <input type="password" id="loginPwInput" placeholder="비밀번호 입력" autocomplete="off">
-    <p class="small-note" style="margin-top:-6px;">처음엔 1234예요. 로그인 후 꼭 내 비밀번호로 바꿔 주세요!</p>
-    <button class="btn btn-primary" id="loginBtn" style="margin-top:18px;">입장하기</button>
+    <label class="field-label" style="margin-top:14px;">🔑 비밀번호${su?' (4자 이상, 직접 정하세요)':''}</label>
+    <input type="password" id="loginPwInput" placeholder="${su?'사용할 비밀번호':'비밀번호 입력'}" autocomplete="off">
+    ${su?`<label class="field-label" style="margin-top:14px;">🔑 비밀번호 확인</label>
+    <input type="password" id="loginPw2Input" placeholder="비밀번호를 한 번 더" autocomplete="off">
+    <p class="small-note">비밀번호는 꼭 기억해 두세요. 잊으면 선생님께 초기화를 요청해야 해요.</p>`:''}
+    <button class="btn btn-primary" id="loginBtn" style="margin-top:18px;">${su?'가입하고 입장하기':'입장하기'}</button>
+    <button class="btn btn-outline" id="loginModeBtn" style="margin-top:10px;">${su?'이미 가입했어요 · 로그인하기':'처음이면 가입하기'}</button>
     <button class="btn btn-ghost" id="loginTeacherBtn" style="margin-top:10px;">👩‍🏫 강사 로그인</button>
   </div>
   `;
-}
-async function attemptLogin(){
-  const nameEl = document.getElementById('loginNameInput');
-  const pwEl = document.getElementById('loginPwInput');
-  const nm = (nameEl ? nameEl.value : '').trim();
-  if(!nm){ await showAlert('이름을 입력해 주세요!'); return; }
-  const pw = (pwEl ? pwEl.value : '').trim();
-  if(!pw){ await showAlert('비밀번호를 입력해 주세요!'); return; }
-  if(!hasStudentBank(nm)){ await showAlert('이름이나 비밀번호가 맞지 않아요. 선생님께 확인해 주세요!'); return; }
-  showLoadingModal('로그인 확인 중...');
-  const okPw = await verifyLogin(nm,pw);
-  hideLoadingModal();
-  if(!okPw){ await showAlert('이름이나 비밀번호가 맞지 않아요. 선생님께 확인해 주세요!'); return; }
-  applyBank(nm);
-  state.name = nm;
-  saveLastUsedName(nm);
-  showLoadingModal('이전 기록을 확인하고 있어요...');
-  serverResumeCache = await fetchServerResumeSnapshots(nm);
-  hideLoadingModal();
-  screen = 'setup';
-  render();
 }
 
 function renderSetup(){
@@ -1220,7 +1246,6 @@ function renderSetup(){
   <div class="card">
     <h2 class="card-title" style="font-size:15.5px;">📈 내 기록 · 오답노트</h2>
     <button class="btn btn-outline" id="myStatsBtn">내 기록 보기</button>
-    <button class="btn btn-ghost" id="chPwBtn" style="margin-top:8px;">🔑 비밀번호 변경</button>
   </div>
   <div class="card">
     <h2 class="card-title" style="font-size:15.5px;">👩‍🏫 강사용</h2>
@@ -1406,49 +1431,6 @@ function renderMyStats(){
   `;
 }
 
-function renderChPw(){
-  return `
-  <div class="card">
-    <h2 class="card-title">🔑 비밀번호 변경</h2>
-    <p class="card-sub">${escapeHtml(state.name)} 학생의 비밀번호를 바꿔요. (4자 이상)</p>
-    <label class="field-label" style="margin-top:12px;">현재 비밀번호</label>
-    <input type="password" id="cpOld" autocomplete="off">
-    <label class="field-label" style="margin-top:12px;">새 비밀번호</label>
-    <input type="password" id="cpNew" autocomplete="off">
-    <label class="field-label" style="margin-top:12px;">새 비밀번호 확인</label>
-    <input type="password" id="cpNew2" autocomplete="off">
-    <button class="btn btn-primary" id="cpSave" style="margin-top:16px;">변경하기</button>
-    <button class="btn btn-ghost" id="cpCancel" style="margin-top:8px;">취소</button>
-  </div>`;
-}
-async function changePassword(){
-  const name=state.name;
-  const o=document.getElementById('cpOld').value.trim(), n=document.getElementById('cpNew').value.trim(), n2=document.getElementById('cpNew2').value.trim();
-  if(!o||!n||!n2){ await showAlert('모두 입력해 주세요!'); return; }
-  if(n.length<4){ await showAlert('새 비밀번호는 4자 이상으로 해 주세요.'); return; }
-  if(n!==n2){ await showAlert('새 비밀번호가 서로 달라요.'); return; }
-  if(n===o){ await showAlert('현재 비밀번호와 다르게 정해 주세요.'); return; }
-  if(n===DEFAULT_STUDENT_PW){ await showAlert('1234는 기본 비밀번호라서 쓸 수 없어요.'); return; }
-  showLoadingModal('변경 중...');
-  const oldOk=await verifyLogin(name,o);
-  if(!oldOk){ hideLoadingModal(); await showAlert('현재 비밀번호가 맞지 않아요.'); return; }
-  const oh=pwHash(name,o), nh=pwHash(name,n);
-  const sv=await fetchServerPw(name);
-  let msg='비밀번호가 변경됐어요. 다음부터 새 비밀번호로 로그인하세요!';
-  if(sv.supported){
-    try{
-      const r=await fetch(SHEET_WEBHOOK_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:'setPw',name:name,oldHash:oh,newHash:nh})});
-      const j=await r.json();
-      if(!(j && j.result==='success')){ hideLoadingModal(); await showAlert('변경에 실패했어요. 잠시 후 다시 해 주세요.'); return; }
-    }catch(e){ hideLoadingModal(); await showAlert('인터넷 연결을 확인하고 다시 해 주세요.'); return; }
-  } else {
-    msg='비밀번호가 변경됐어요. (이 기기에만 저장됐어요)';
-  }
-  setLocalPwHash(name,nh);
-  hideLoadingModal();
-  await showAlert(msg);
-  screen='setup'; render();
-}
 function renderTLogin(){
   return `
   <div class="card">
@@ -1475,8 +1457,9 @@ function renderTDash(){
     <div id="sheetAllList"><p class="small-note">🔍 구글 시트에서 학생 목록을 불러오는 중...</p></div>
   </div>
   <div class="card">
-    <h2 class="card-title" style="font-size:15px;">🔑 학생별 로그인 비밀번호</h2>
-    <p class="card-sub">학생마다 다른 비밀번호를 써요. 비밀번호는 앱 파일 안에 암호화된 값으로 들어 있어서, 바꾸려면 새 파일로 교체해야 해요.</p>
+    <h2 class="card-title" style="font-size:15px;">🔑 학생 계정 안내</h2>
+    <p class="card-sub">등록된 학생은 처음 접속할 때 「처음이면 가입하기」에서 비밀번호를 직접 정해요. 과학·수학 면접앱과 같은 계정을 쓰고(한 번만 가입), 비밀번호는 변환된 값으로만 과학 구글 시트의 「회원」 탭에 저장돼요.</p>
+    <p class="small-note">비밀번호를 잊은 학생은 과학 구글 시트의 「회원」 탭에서 그 학생 줄을 지우면 다시 가입할 수 있어요.</p>
   </div>
   <div class="card">
     <h2 class="card-title" style="font-size:15px;">🔒 강사용 비밀번호 설정</h2>
@@ -2170,6 +2153,9 @@ function bindEvents(){
   if(screen==='login'){
     document.getElementById('loginBtn').onclick=()=>attemptLogin();
     document.getElementById('loginTeacherBtn').onclick=()=>{ tFrom='login'; screen='tlogin'; render(); };
+    document.getElementById('loginModeBtn').onclick=()=>{ const n=document.getElementById('loginNameInput').value; state.name=n.trim(); loginMode=(loginMode==='login'?'signup':'login'); render(); };
+    const loginPw2Input=document.getElementById('loginPw2Input');
+    if(loginPw2Input) loginPw2Input.onkeydown=(e)=>{ if(e.key==='Enter') attemptLogin(); };
     const loginNameInput=document.getElementById('loginNameInput');
     if(loginNameInput) loginNameInput.onkeydown=(e)=>{ if(e.key==='Enter') attemptLogin(); };
     const loginPwInput=document.getElementById('loginPwInput');
@@ -2219,7 +2205,6 @@ function bindEvents(){
     };
     document.getElementById('micTestBtn').onclick=()=>testMic();
     document.getElementById('myStatsBtn').onclick=()=>{ screen='mystats'; render(); };
-    document.getElementById('chPwBtn').onclick=()=>{ screen='chpw'; render(); };
     document.getElementById('teacherBtn').onclick=()=>{ tFrom='setup'; screen='tlogin'; render(); };
     const logoutBtn=document.getElementById('logoutBtn');
     if(logoutBtn) logoutBtn.onclick=()=>{ state=newSession(); serverResumeCache={normal:null,wrong:null}; screen='login'; render(); };
@@ -2390,10 +2375,6 @@ function bindEvents(){
     if(pdfBtn) pdfBtn.onclick=()=>downloadLocalWrongNotePDF(state.name);
     const printBtn2=document.getElementById('printBtn2');
     if(printBtn2) printBtn2.onclick=()=>printLocalWrongNote(state.name);
-  }
-  else if(screen==='chpw'){
-    document.getElementById('cpSave').onclick=()=>changePassword();
-    document.getElementById('cpCancel').onclick=()=>{ screen='setup'; render(); };
   }
   else if(screen==='tlogin'){
     document.getElementById('pwSubmit').onclick=async()=>{
