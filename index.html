@@ -257,12 +257,13 @@ async function fetchServerAcct(name){
   try{
     const r=await fetch(DDAY_URL+'?action=getAcct&name='+encodeURIComponent(name)+'&_='+Date.now());
     const j=await r.json();
-    if(j && j.ok && j.supported) return {supported:true,exists:!!j.exists,hash:j.hash||''};
+    if(j && j.ok && j.supported) return {supported:true,approval:!!j.approval,exists:!!j.exists,hash:j.hash||'',status:j.status||''};
   }catch(e){}
   return {supported:false};
 }
 function getLocalAcct(name){ try{ return localStorage.getItem('acct_stu_'+name); }catch(e){ return null; } }
 function setLocalAcct(name,h){ try{ localStorage.setItem('acct_stu_'+name,h); }catch(e){} }
+/* 가입은 '승인 대기'로 접수되고, 강사가 승인해야 로그인할 수 있어요 */
 async function attemptSignup(){
   const nm=(document.getElementById('loginNameInput').value||'').trim();
   const pw=(document.getElementById('loginPwInput').value||'').trim();
@@ -271,22 +272,18 @@ async function attemptSignup(){
   if(!hasStudentBank(nm)){ await showAlert('등록된 학생 이름이 아니에요. 선생님께 이름을 확인해 주세요!'); return; }
   if(pw.length<4){ await showAlert('비밀번호는 4자 이상으로 정해 주세요.'); return; }
   if(pw!==pw2){ await showAlert('비밀번호 확인이 달라요. 다시 입력해 주세요.'); return; }
-  showLoadingModal('가입 중...');
+  showLoadingModal('가입 신청 중...');
   const h=pwHash(nm,pw);
   const sv=await fetchServerAcct(nm);
-  if(sv.supported){
-    if(sv.exists){ hideLoadingModal(); await showAlert('이미 가입된 이름이에요. 로그인해 주세요.\n(비밀번호를 잊었다면 선생님께 초기화를 요청하세요.)'); return; }
-    try{ await fetch(DDAY_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:'signup',name:nm,hash:h})}); }catch(e){}
-    const chk=await fetchServerAcct(nm);
-    if(!(chk.supported && chk.exists && chk.hash===h)){ hideLoadingModal(); await showAlert('가입에 실패했어요. 인터넷 연결을 확인하고 다시 해 주세요.'); return; }
-  } else {
-    // 서버가 아직 업데이트되지 않은 경우: 이 기기에만 저장
-    if(getLocalAcct(nm)){ hideLoadingModal(); await showAlert('이 기기에 이미 가입된 이름이에요. 로그인해 주세요.'); return; }
-  }
-  setLocalAcct(nm,h);
+  if(!sv.supported || !sv.approval){ hideLoadingModal(); await showAlert('가입 서버에 연결하지 못했어요. 인터넷 연결을 확인하고 다시 해 주세요.\n(계속 안 되면 선생님께 알려 주세요.)'); return; }
+  if(sv.exists){ hideLoadingModal(); await showAlert(sv.status==='대기' ? '이미 가입 신청이 되어 있어요. 선생님의 승인을 기다려 주세요.' : '이미 가입된 이름이에요. 로그인해 주세요.\n(비밀번호를 잊었다면 선생님께 초기화를 요청하세요.)'); return; }
+  try{ await fetch(DDAY_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:'signup',name:nm,hash:h})}); }catch(e){}
+  const chk=await fetchServerAcct(nm);
   hideLoadingModal();
-  await showAlert(sv.supported ? '가입 완료! 바로 입장할게요.' : '가입 완료! (이 기기에만 저장됐어요) 바로 입장할게요.');
-  await enterApp(nm);
+  if(!(chk.supported && chk.exists && chk.hash===h)){ await showAlert('가입 신청에 실패했어요. 인터넷 연결을 확인하고 다시 해 주세요.'); return; }
+  loginMode='login';
+  await showAlert('가입 신청이 접수됐어요! 🙌\n선생님이 승인하면 이 이름과 비밀번호로 로그인할 수 있어요.');
+  state.name=nm; render();
 }
 async function attemptLogin(){
   if(loginMode==='signup') return attemptSignup();
@@ -298,17 +295,54 @@ async function attemptLogin(){
   showLoadingModal('로그인 확인 중...');
   const h=pwHash(nm,pw);
   const sv=await fetchServerAcct(nm);
-  let ok=false, noAcct=false;
-  if(sv.supported){ if(!sv.exists) noAcct=true; else { ok=(h===sv.hash); if(ok) setLocalAcct(nm,h); } }
-  else { const lh=getLocalAcct(nm); if(!lh) noAcct=true; else ok=(h===lh); }
+  let ok=false, noAcct=false, pending=false;
+  if(sv.supported){
+    if(!sv.exists) noAcct=true;
+    else if(sv.status==='대기') pending=true;
+    else { ok=(h===sv.hash); if(ok) setLocalAcct(nm,h); }
+  } else { const lh=getLocalAcct(nm); if(!lh) noAcct=true; else ok=(h===lh); }
   hideLoadingModal();
-  if(noAcct){ await showAlert('가입되지 않은 이름이에요. 아래 「처음이면 가입하기」를 눌러 가입해 주세요.'); return; }
+  if(pending){ await showAlert('아직 선생님의 가입 승인을 기다리는 중이에요. ⏳\n승인되면 로그인할 수 있어요.'); return; }
+  if(noAcct){ await showAlert('가입되지 않은 이름이에요. 아래 「처음이면 가입하기」를 눌러 가입 신청해 주세요.'); return; }
   if(!ok){ await showAlert('이름이나 비밀번호가 맞지 않아요. 다시 확인해 주세요.'); return; }
   await enterApp(nm);
+}
+/* ===== 강사용: 가입 승인 관리 (관리자 키는 앱스크립트의 APPROVE_KEY) ===== */
+function getApprKey(){ try{ return localStorage.getItem('appr_key')||''; }catch(e){ return ''; } }
+function setApprKey(k){ try{ localStorage.setItem('appr_key',k); }catch(e){} }
+async function acctPost(action,name){
+  try{ await fetch(DDAY_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:action,name:name,key:getApprKey()})}); }catch(e){}
+}
+async function loadAcctPanel(){
+  const el=document.getElementById('acctPanel'); if(!el) return;
+  const key=getApprKey();
+  if(!key){
+    el.innerHTML='<p class="small-note">앱스크립트에 적어 둔 <b>관리자 키(APPROVE_KEY)</b>를 한 번 입력하면 가입 신청 목록이 보여요. (이 기기에만 저장돼요)</p><div class="row2"><input type="password" id="apprKeyInput" placeholder="관리자 키" style="flex:1;"><button class="btn btn-primary" id="apprKeySave" style="flex:none;width:auto;padding-left:20px;padding-right:20px;">저장</button></div>';
+    document.getElementById('apprKeySave').onclick=()=>{ const v=(document.getElementById('apprKeyInput').value||'').trim(); if(v){ setApprKey(v); loadAcctPanel(); } };
+    return;
+  }
+  el.innerHTML='<p class="small-note">🔍 가입 목록을 불러오는 중...</p>';
+  let j=null;
+  try{ const r=await fetch(DDAY_URL+'?action=listAcct&key='+encodeURIComponent(key)+'&_='+Date.now()); j=await r.json(); }catch(e){}
+  if(!j){ el.innerHTML='<p class="small-note">⚠️ 목록을 불러오지 못했어요. 인터넷 연결을 확인하거나, 과학 앱스크립트를 새 버전으로 배포했는지 확인해 주세요.</p><button class="btn btn-outline" id="apprReload">다시 불러오기</button>'; document.getElementById('apprReload').onclick=()=>loadAcctPanel(); return; }
+  if(j.denied){ setApprKey(''); el.innerHTML='<p class="small-note">⚠️ 관리자 키가 맞지 않아요. 다시 입력해 주세요.</p><button class="btn btn-outline" id="apprReload">키 다시 입력</button>'; document.getElementById('apprReload').onclick=()=>loadAcctPanel(); return; }
+  const list=j.list||[], pend=list.filter(a=>a.status==='대기'), done=list.filter(a=>a.status!=='대기');
+  const row=(a,btns)=>'<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid #eee;"><div style="flex:1;"><b>'+escapeHtml(a.name)+'</b><div class="small-note" style="margin:0;">'+escapeHtml(a.date||'')+'</div></div>'+btns+'</div>';
+  const pendHtml=pend.length? pend.map(a=>row(a,'<button class="btn btn-primary apprOk" data-n="'+escapeHtml(a.name)+'" style="flex:none;width:auto;padding:8px 14px;">승인</button><button class="btn btn-ghost apprNo" data-n="'+escapeHtml(a.name)+'" style="flex:none;width:auto;padding:8px 14px;">거절</button>')).join('') : '<p class="small-note">승인을 기다리는 가입 신청이 없어요.</p>';
+  const doneHtml=done.length? '<details style="margin-top:12px;"><summary style="cursor:pointer;font-weight:700;">승인된 학생 '+done.length+'명 (비밀번호 초기화)</summary>'+done.map(a=>row(a,'<button class="btn btn-ghost apprNo" data-n="'+escapeHtml(a.name)+'" data-reset="1" style="flex:none;width:auto;padding:8px 14px;">초기화</button>')).join('')+'</details>' : '';
+  el.innerHTML='<div style="font-weight:800;margin-bottom:4px;">⏳ 승인 대기 '+pend.length+'명</div>'+pendHtml+doneHtml+'<button class="btn btn-outline" id="apprReload" style="margin-top:12px;">🔄 새로고침</button>';
+  document.getElementById('apprReload').onclick=()=>loadAcctPanel();
+  el.querySelectorAll('.apprOk').forEach(b=>b.onclick=async()=>{ b.disabled=true; await acctPost('approve',b.dataset.n); loadAcctPanel(); });
+  el.querySelectorAll('.apprNo').forEach(b=>b.onclick=async()=>{
+    const msg=b.dataset.reset? b.dataset.n+' 학생의 가입 정보를 지워서 비밀번호를 초기화할까요? (다시 가입 신청해야 해요)' : b.dataset.n+' 학생의 가입 신청을 거절할까요?';
+    if(!(await showConfirm(msg))) return;
+    b.disabled=true; await acctPost('reject',b.dataset.n); loadAcctPanel();
+  });
 }
 async function enterApp(nm){
   loginMode='login';
   state.name = nm;
+  applyBank(nm);
   saveLastUsedName(nm);
   showLoadingModal('이전 기록을 확인하고 있어요...');
   serverResumeCache = await fetchServerResumeSnapshots(nm);
@@ -1074,6 +1108,7 @@ document.addEventListener('click',async function(e){
 });
 
 function render(){
+  if(state && state.name && hasStudentBank(state.name)) applyBank(state.name); // 학생 이름에 맞는 문제은행 적용
   const app=document.getElementById('app');
   if(screen==='login') app.innerHTML=renderLogin();
   else if(screen==='setup') app.innerHTML=renderSetup();
@@ -1457,9 +1492,9 @@ function renderTDash(){
     <div id="sheetAllList"><p class="small-note">🔍 구글 시트에서 학생 목록을 불러오는 중...</p></div>
   </div>
   <div class="card">
-    <h2 class="card-title" style="font-size:15px;">🔑 학생 계정 안내</h2>
-    <p class="card-sub">등록된 학생은 처음 접속할 때 「처음이면 가입하기」에서 비밀번호를 직접 정해요. 과학·수학 면접앱과 같은 계정을 쓰고(한 번만 가입), 비밀번호는 변환된 값으로만 과학 구글 시트의 「회원」 탭에 저장돼요.</p>
-    <p class="small-note">비밀번호를 잊은 학생은 과학 구글 시트의 「회원」 탭에서 그 학생 줄을 지우면 다시 가입할 수 있어요.</p>
+    <h2 class="card-title" style="font-size:15px;">🔑 가입 승인</h2>
+    <p class="card-sub">학생이 「처음이면 가입하기」로 신청하면 여기에 뜨고, <b>승인</b>해야 로그인할 수 있어요. 과학·수학·학생별 모의면접 세 앱이 같은 계정을 쓰므로 한 번만 승인하면 돼요.</p>
+    <div id="acctPanel"></div>
   </div>
   <div class="card">
     <h2 class="card-title" style="font-size:15px;">🔒 강사용 비밀번호 설정</h2>
@@ -2386,6 +2421,7 @@ function bindEvents(){
   }
   else if(screen==='tdash'){
     document.getElementById('backSetupBtn').onclick=()=>{ screen=tFrom; render(); };
+    loadAcctPanel();
     const savePwBtn=document.getElementById('savePwBtn');
     if(savePwBtn) savePwBtn.onclick=async()=>{
       const pw=(document.getElementById('newPwInput').value||'').trim();
