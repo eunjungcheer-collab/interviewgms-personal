@@ -342,7 +342,6 @@ async function loadAcctPanel(){
 async function enterApp(nm){
   loginMode='login';
   state.name = nm;
-  applyBank(nm);
   saveLastUsedName(nm);
   showLoadingModal('이전 기록을 확인하고 있어요...');
   serverResumeCache = await fetchServerResumeSnapshots(nm);
@@ -1108,7 +1107,6 @@ document.addEventListener('click',async function(e){
 });
 
 function render(){
-  if(state && state.name && hasStudentBank(state.name)) applyBank(state.name); // 학생 이름에 맞는 문제은행 적용
   const app=document.getElementById('app');
   if(screen==='login') app.innerHTML=renderLogin();
   else if(screen==='setup') app.innerHTML=renderSetup();
